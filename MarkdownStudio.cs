@@ -1489,6 +1489,7 @@ static class MarkdownStudio
     static int ServePort = 0;
     static IntPtr FloatMain = IntPtr.Zero, FloatWin = IntPtr.Zero;
     static readonly object FloatLock = new object();
+    static readonly object FloatOpenLock = new object();   // one window being opened at a time
 
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
@@ -1532,6 +1533,14 @@ static class MarkdownStudio
     // bottom-right corner of the screen the app is on.
     static void FloatOpen(string id)
     {
+        // Two requests close together (a double click, a key held down) used to both
+        // find no window to close yet and each open one: two floating windows. Now the
+        // second waits until the first has its window, and closes it before opening its own.
+        lock (FloatOpenLock) FloatOpenOne(id);
+    }
+
+    static void FloatOpenOne(string id)
+    {
         string browser = FindBrowser();
         if (browser == null || ServePort == 0) return;
         try { SetProcessDPIAware(); } catch { }
@@ -1552,6 +1561,7 @@ static class MarkdownStudio
         psi.UseShellExecute = false;
         try { Process.Start(psi); } catch { return; }
 
+        ManualResetEvent settled = new ManualResetEvent(false);
         Thread t = new Thread(delegate()
         {
             for (int i = 0; i < 60; i++)
@@ -1562,14 +1572,17 @@ static class MarkdownStudio
                     if (before.ContainsKey(w.Key) || w.Value != "Markdown Studio") continue;
                     PinFloat(w.Key);
                     lock (FloatLock) FloatWin = w.Key;
+                    settled.Set();
                     WatchFloat(w.Key);
                     return;
                 }
             }
+            settled.Set();                      // never appeared: do not hold the next open up
         });
         t.IsBackground = true;
         t.SetApartmentState(ApartmentState.STA);
         t.Start();
+        settled.WaitOne(10000);
     }
 
     // The browser may have started a helper process for the new window; look again then.

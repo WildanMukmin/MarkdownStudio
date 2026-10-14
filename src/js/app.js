@@ -3032,10 +3032,12 @@
   const PIP_EXE = !!SRV_KEY;
   const PIP_OK = PIP_EXE || (typeof window.documentPictureInPicture === "object" && !!window.isSecureContext);
   let pipWin = null, pipMode = "preview";          /* the browser's own window, when that is the form */
-  let pipChan = null, pipLive = false, pipTimer = null;   /* the launcher's window */
+  let pipChan = null, pipLive = false, pipTimer = null, pipStarting = false;   /* the launcher's window */
 
   function pipOn() { return !!state.settings.pip && PIP_OK; }
-  function pipOpen() { return !!pipWin || pipLive; }
+  /* "starting" counts: until the window says hello it is not live yet, and a second
+     press in that gap used to open a second window */
+  function pipOpen() { return !!pipWin || pipLive || pipStarting; }
   function pipUI() {
     const b = $("#btnPip"), m = document.querySelector('[data-act="pip"]');
     if (b) { b.hidden = !pipOn(); b.classList.toggle("on", pipOpen()); }
@@ -3212,7 +3214,7 @@
     pipChan.onmessage = e => {
       const m = e.data || {};
       if (m.type === "hello") {
-        pipLive = true; clearTimeout(pipTimer); pipUI();
+        pipLive = true; pipStarting = false; clearTimeout(pipTimer); pipUI();
         pipChan.postMessage(Object.assign({ type: "state", full: true }, floatState()));
       } else if (m.type === "mode") { pipMode = pipMode === "preview" ? "edit" : "preview"; pipSync(true); }
       else if (m.type === "edit") floatDo.edit(m.text);
@@ -3223,9 +3225,18 @@
       else if (m.type === "close") closePip();
       else if (m.type === "closed") { pipLive = false; pipUI(); }
     };
-    fetch(floatUrl("open", id), { method: "POST" }).catch(() => toast(tr("Could not open the picture-in-picture window: ") + "launcher"));
+    pipStarting = true;
+    pipUI();
+    fetch(floatUrl("open", id), { method: "POST" }).catch(() => {
+      pipStarting = false; pipUI();
+      toast(tr("Could not open the picture-in-picture window: ") + "launcher");
+    });
     clearTimeout(pipTimer);
-    pipTimer = setTimeout(() => { if (!pipLive) toast(tr("Could not open the picture-in-picture window: ") + tr("it did not start")); }, 12000);
+    pipTimer = setTimeout(() => {
+      if (pipLive) return;
+      pipStarting = false; pipUI();
+      toast(tr("Could not open the picture-in-picture window: ") + tr("it did not start"));
+    }, 12000);
   }
   const floatUrl = (op, id) => "/__float?k=" + encodeURIComponent(SRV_KEY) + "&op=" + op + (id ? "&id=" + id : "");
 
@@ -3255,7 +3266,8 @@
       if (pipChan) pipChan.postMessage({ type: "close" });
       fetch(floatUrl("close"), { method: "POST" }).catch(() => { });
     }
-    pipLive = false;
+    pipLive = false; pipStarting = false;
+    clearTimeout(pipTimer);
     pipUI();
   }
   /* called after every render, tab switch and theme change */
