@@ -14,6 +14,88 @@
 
   const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 
+  /* ---------- dialogs ---------- */
+  /* The browser's own confirm() and prompt() are a different window, in a different
+     style, in the browser's language, and in the exe they flash a native box over the
+     app. These are the app's own: one at a time, answered as a promise, so the call
+     reads the way the native one did - `if (!(await askConfirm(...))) return;`.
+     Esc and the backdrop cancel, Enter accepts, Tab stays inside, and focus goes back
+     to where it was. */
+  let dlgOpen = null;
+  function askDialog(o) {
+    if (dlgOpen) dlgOpen.close(o.input ? null : false);
+    return new Promise(resolve => {
+      const back = document.createElement("div");
+      back.className = "overlay dlg-back";
+      const box = document.createElement("div");
+      box.className = "sheet dlg";
+      box.setAttribute("role", o.danger ? "alertdialog" : "dialog");
+      box.setAttribute("aria-modal", "true");
+      const id = "dlg" + Date.now().toString(36);
+      const msg = document.createElement("div");
+      msg.className = "dlg-msg"; msg.id = id;
+      msg.textContent = o.message;
+      box.setAttribute("aria-labelledby", id);
+      box.appendChild(msg);
+      let field = null;
+      if (o.input) {
+        field = document.createElement("input");
+        field.type = "text"; field.className = "dlg-in";
+        field.value = o.value || "";
+        field.setAttribute("aria-labelledby", id);
+        field.spellcheck = false;
+        box.appendChild(field);
+      }
+      const row = document.createElement("div");
+      row.className = "dlg-row";
+      const no = document.createElement("button");
+      no.type = "button"; no.className = "btn btn-out"; no.textContent = tr("Cancel");
+      const yes = document.createElement("button");
+      yes.type = "button"; yes.className = "btn btn-pri" + (o.danger ? " dlg-danger" : "");
+      yes.textContent = o.ok || tr("OK");
+      row.appendChild(no); row.appendChild(yes);
+      box.appendChild(row);
+      back.appendChild(box);
+
+      const was = document.activeElement;
+      let done = false;
+      const api = {
+        close(v) {
+          if (done) return;
+          done = true;
+          dlgOpen = null;
+          back.remove();
+          try { if (was && was.focus && document.contains(was)) was.focus(); } catch (e) { }
+          resolve(v);
+        }
+      };
+      const accept = () => api.close(o.input ? field.value : true);
+      const cancel = () => api.close(o.input ? null : false);
+      yes.addEventListener("click", accept);
+      no.addEventListener("click", cancel);
+      back.addEventListener("mousedown", e => { if (e.target === back) cancel(); });
+      back.addEventListener("keydown", e => {
+        e.stopPropagation();                      /* nothing behind the dialog hears keys */
+        if (e.key === "Escape") { e.preventDefault(); cancel(); }
+        else if (e.key === "Enter" && !(e.target === no)) { e.preventDefault(); accept(); }
+        else if (e.key === "Tab") {
+          const f = [field, no, yes].filter(Boolean);
+          const i = f.indexOf(document.activeElement);
+          e.preventDefault();
+          f[(i + (e.shiftKey ? f.length - 1 : 1)) % f.length].focus();
+        }
+      });
+      dlgOpen = api;
+      document.body.appendChild(back);
+      /* a destructive question starts on Cancel, so a held Enter cannot confirm it */
+      const first = field || (o.danger ? no : yes);
+      first.focus();
+      if (field) field.select();
+    });
+  }
+  const askConfirm = (message, opts) => askDialog(Object.assign({ message: message }, opts));
+  const askInput = (message, value) => askDialog({ message: message, input: true, value: value });
+
   /* ---------- toast ---------- */
   let toastTimer;
   function toast(msg, ms) {
@@ -788,9 +870,10 @@
     return true;
   }
 
-  function closeFolder() {
+  async function closeFolder() {
     if (tabs.some(t => t.kind === "file" && isDirty(t)) &&
-      !confirm(tr("Some open files have unsaved changes. Close the folder anyway?"))) return;
+      !(await askConfirm(tr("Some open files have unsaved changes. Close the folder anyway?"),
+        { danger: true, ok: tr("Close folder") }))) return;
     tabs.filter(t => t.kind === "file").forEach(t => { tabs = tabs.filter(x => x.id !== t.id); });
     root = null; tree = null; reopen = null;
     dropSearchCache();
@@ -806,7 +889,7 @@
      the new file used to replace one of the same name without a word. */
   async function newFileInFolder(dir) {
     if (!root || root.readonly || (root.mode !== "fs" && root.mode !== "server")) return;
-    let name = prompt(tr("New file name:"), "untitled.md");
+    let name = await askInput(tr("New file name:"), "untitled.md");
     if (!name) return;
     name = name.trim().replace(/[\\/:*?"<>|]/g, "-");
     if (!MD_EXT.test(name)) name += ".md";
@@ -943,12 +1026,17 @@
   }
 
   function closeTab(id) {
+    const t = tabs.find(x => x.id === id);
+    if (!t) return;
+    if (t.id === activeTab) stashActive();
+    if (!isDirty(t)) { closeTabNow(id); return; }
+    askConfirm('"' + t.name + '" ' + tr("has unsaved changes. Close it anyway?"),
+      { danger: true, ok: tr("Close anyway") }).then(ok => { if (ok) closeTabNow(id); });
+  }
+  function closeTabNow(id) {
     const i = tabs.findIndex(t => t.id === id);
     if (i < 0) return;
     const t = tabs[i];
-    if (t.id === activeTab) stashActive();
-    if (isDirty(t) &&
-      !confirm('"' + t.name + '" ' + tr("has unsaved changes. Close it anyway?"))) return;
     const wasActive = activeTab === id;
     rememberClosed(t);
     tabs.splice(i, 1);
@@ -959,15 +1047,15 @@
   }
 
   /* one confirm for the lot instead of one per unsaved tab */
-  function closeAllTabs() {
+  async function closeAllTabs() {
     stashActive();
     const n = tabs.length;
     const dirty = tabs.filter(isDirty);
     /* one sentence with the number in it, rather than English plural machinery that
        no other language would follow */
-    if (dirty.length && !confirm(
+    if (dirty.length && !(await askConfirm(
       tr("%n open files have unsaved changes. Close all tabs anyway?")
-        .replace("%n", dirty.length))) return;
+        .replace("%n", dirty.length), { danger: true, ok: tr("Close all") }))) return;
     tabs.forEach(rememberClosed);
     tabs = []; activeTab = null;
     ensureTab();
@@ -2053,8 +2141,8 @@
     }
     if (!edits.length) return;
     const links = edits.reduce((a, e) => a + e.count, 0);
-    if (!confirm(tr("Update %n links in %m files to the new name?")
-      .replace("%n", links).replace("%m", edits.length))) return;
+    if (!(await askConfirm(tr("Update %n links in %m files to the new name?")
+      .replace("%n", links).replace("%m", edits.length), { ok: tr("Update links") }))) return;
     let done = 0;
     for (const e of edits) {
       const t = tabs.find(x => x.kind === "file" && x.path === e.f.path);
@@ -2085,8 +2173,9 @@
   async function deleteEntry(n) {
     if (!canEdit()) return;
     const exe = root.mode === "server";
-    if (!confirm(tr("Delete") + ' "' + n.name + '"? ' +
-      tr(exe ? "It goes to the Recycle Bin." : "This cannot be undone."))) return;
+    if (!(await askConfirm(tr("Delete") + ' "' + n.name + '"? ' +
+      tr(exe ? "It goes to the Recycle Bin." : "This cannot be undone."),
+      { danger: true, ok: tr("Delete") }))) return;
     try {
       if (exe) {
         const r = await fetch(entryUrl(SRV_WS, n.path), { method: "DELETE" });
@@ -2122,12 +2211,12 @@
       if (n) { await openFileNode(n); return; }
     }
   }
-  function closeOthers(id) {
+  async function closeOthers(id) {
     stashActive();
     const others = tabs.filter(t => t.id !== id);
     const dirty = others.filter(isDirty);
-    if (dirty.length && !confirm(tr("%n open files have unsaved changes. Close all tabs anyway?")
-      .replace("%n", dirty.length))) return;
+    if (dirty.length && !(await askConfirm(tr("%n open files have unsaved changes. Close all tabs anyway?")
+      .replace("%n", dirty.length), { danger: true, ok: tr("Close all") }))) return;
     others.forEach(rememberClosed);
     tabs = tabs.filter(t => t.id === id);
     activateTab(id, true);
@@ -3232,9 +3321,9 @@
   async function deleteDoc(id) {
     const d = state.docs.find(x => x.id === id);
     if (!d) return;
-    if (!confirm(tr("Delete") + ' "' + (d.name || tr("Untitled")) + '"? ' +
+    if (!(await askConfirm(tr("Delete") + ' "' + (d.name || tr("Untitled")) + '"? ' +
       (d.file && LIB.ok ? d.file + tr(" goes to the Recycle Bin.")
-        : tr("This cannot be undone.")))) return;
+        : tr("This cannot be undone.")), { danger: true, ok: tr("Delete") }))) return;
     /* a failed delete must not leave the file behind: it would come back as a new
        document on the next start */
     if (d.file && LIB.ok) {
@@ -3415,19 +3504,33 @@
         '" title="' + esc(tr(t.label)) + '" aria-label="' + esc(tr(t.label)) +
         '" type="button">' + (t.txt ? t.t : I(t.i)) + "</button>").join("");
   }
-  function insertLink() {
-    const sel = ed.value.slice(ed.selectionStart, ed.selectionEnd);
-    const url = prompt(tr("Link URL:"), /^https?:|^\//.test(sel) ? sel : "https://");
-    if (url === null) return;
-    if (/^https?:|^\//.test(sel)) { wrap("[", "](" + url + ")", "link text"); return; }
-    const label = sel || prompt(tr("Link text:"), "link text") || "link";
-    insert("[" + label + "](" + url + ")");
+  /* the dialog takes focus away, so the selection is remembered and put back */
+  function restoreSel(a, b) { ed.focus(); try { ed.setSelectionRange(a, b); } catch (e) { } }
+  async function insertLink() {
+    const a = ed.selectionStart, b = ed.selectionEnd;
+    const sel = ed.value.slice(a, b);
+    const url = await askInput(tr("Link URL:"), /^https?:|^\//.test(sel) ? sel : "https://");
+    if (url === null) { restoreSel(a, b); return; }
+    if (/^https?:|^\//.test(sel)) { restoreSel(a, b); wrap("[", "](" + url + ")", "link text"); return; }
+    let label = sel;
+    if (!label) {
+      label = await askInput(tr("Link text:"), "link text");
+      if (label === null) { restoreSel(a, b); return; }
+    }
+    restoreSel(a, b);
+    insert("[" + (label || "link") + "](" + url + ")");
   }
-  function insertImage() {
-    const url = prompt(tr("Image URL or path:"), "https://");
-    if (url === null) return;
-    const alt = ed.value.slice(ed.selectionStart, ed.selectionEnd) || prompt(tr("Alt text:"), "image") || "image";
-    insert("![" + alt + "](" + url + ")");
+  async function insertImage() {
+    const a = ed.selectionStart, b = ed.selectionEnd;
+    const url = await askInput(tr("Image URL or path:"), "https://");
+    if (url === null) { restoreSel(a, b); return; }
+    let alt = ed.value.slice(a, b);
+    if (!alt) {
+      alt = await askInput(tr("Alt text:"), "image");
+      if (alt === null) { restoreSel(a, b); return; }
+    }
+    restoreSel(a, b);
+    insert("![" + (alt || "image") + "](" + url + ")");
   }
   function insertFootnote() {
     const used = (ed.value.match(/\[\^(\d+)\]/g) || []).map(x => parseInt(x.replace(/\D/g, ""), 10));
@@ -5174,14 +5277,14 @@
       e.target.value = "";
       if (!f) return;
       const fr = new FileReader();
-      fr.onload = () => {
+      fr.onload = async () => {
         try {
           const data = JSON.parse(String(fr.result));
           if (!data || !Array.isArray(data.docs)) throw new Error("bad");
           const incoming = data.docs.filter(x => x && typeof x.content === "string");
           if (!incoming.length) throw new Error("empty");
-          if (!confirm(tr("Import %n document(s) from this backup?")
-            .replace("%n", incoming.length))) return;
+          if (!(await askConfirm(tr("Import %n document(s) from this backup?")
+            .replace("%n", incoming.length), { ok: tr("Import") }))) return;
           incoming.forEach(x => {
             const d = {
               id: uid(), name: String(x.name || "Imported"), content: String(x.content || ""),
