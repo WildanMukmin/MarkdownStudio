@@ -713,3 +713,17 @@ and the rest of the buttons keep working either way.
   *When something goes wrong*)
 - The first picture pasted into a document creates its `assets` folder; the Explorer
   now opens that folder and flashes the new file instead of showing it collapsed
+
+## Developing
+
+`index.html` is **generated**. Edit the files in `src/` (`template.html`, `style.css`,
+`seed-*.md`, `js/*.js`) and run `.\build-exe.cmd`, which assembles `index.html` with
+`build-html.ps1` and then bakes it into the exe.
+
+Tests:
+
+- `node tests/run.js` - the Markdown parser, the HTML sanitiser (XSS payloads), the
+  diagram engine and the highlighter.
+- `MarkdownStudio.exe --selftest` - the local server's guards (path traversal, Host and
+  Origin checks, key comparison). The result is written to
+  `%TEMP%\markdownstudio-selftest.txt` and the exit code is 0 when everything passes.

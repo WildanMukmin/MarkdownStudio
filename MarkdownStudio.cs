@@ -108,6 +108,7 @@ static class MarkdownStudio
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i];
+                if (a == "--selftest") return SelfTest();
                 if (a == "--register") { Register(); return 0; }
                 if (a == "--unregister") { Unregister(); return 0; }
                 if (a == "--install")
@@ -1703,6 +1704,61 @@ static class MarkdownStudio
 
     // ---------------------------------------------------------------- http
 
+
+    // MarkdownStudio.exe --selftest : checks the parts that keep other pages and other
+    // paths out. Writes the result beside the exe's temp files and returns 0 when all pass.
+    static int SelfTest()
+    {
+        List<string> log = new List<string>();
+        int bad = 0;
+        Action<string, bool> check = delegate(string what, bool ok)
+        { log.Add((ok ? "pass  " : "FAIL  ") + what); if (!ok) bad++; };
+
+        string dir = Path.Combine(Path.GetTempPath(), "mdstudio-selftest-" + NewKey().Substring(0, 8));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            Workspace ws = NewWorkspace(dir);
+            check("plain document resolves", Resolve(ws, "notes/a.md") != null);
+            check("name with dots is fine", Resolve(ws, "notes..md") != null);
+            check(".. climbs out: refused", Resolve(ws, "../a.md") == null);
+            check("nested .. refused", Resolve(ws, "a/../../b.md") == null);
+            check("backslash .. refused", Resolve(ws, "..\\a.md") == null);
+            check("absolute path refused", Resolve(ws, "/etc/a.md") == null);
+            check("drive path refused", Resolve(ws, "C:\\a.md") == null);
+            check("alternate data stream refused", Resolve(ws, "a.md:evil") == null);
+            check("non-document refused", Resolve(ws, "run.exe") == null);
+            check("empty refused", Resolve(ws, "") == null);
+
+            check("host: 127.0.0.1 on our port", HostOk("127.0.0.1:41873", 41873));
+            check("host: localhost on our port", HostOk("localhost:41873", 41873));
+            check("host: rebound domain refused", !HostOk("evil.example:41873", 41873));
+            check("host: wrong port refused", !HostOk("127.0.0.1:80", 41873));
+            check("host: missing refused", !HostOk(null, 41873));
+            check("origin: absent allowed", OriginOk(null, 41873));
+            check("origin: our page allowed", OriginOk("http://127.0.0.1:41873", 41873));
+            check("origin: other site refused", !OriginOk("https://evil.example", 41873));
+            check("origin: null refused", !OriginOk("null", 41873));
+
+            check("key: equal accepted", KeyOk("abc123", "abc123"));
+            check("key: wrong refused", !KeyOk("abc124", "abc123"));
+            check("key: shorter refused", !KeyOk("abc", "abc123"));
+            check("key: missing refused", !KeyOk(null, "abc123"));
+            check("key: empty real key refused", !KeyOk("", ""));
+
+            string h = "GET / HTTP/1.1\r\nhost: 127.0.0.1:1\r\nOrigin: http://x\r\n\r\n";
+            check("header lookup ignores case", HeaderValue(h, "Host") == "127.0.0.1:1");
+            check("header lookup finds origin", HeaderValue(h, "Origin") == "http://x");
+            check("header lookup: absent is null", HeaderValue(h, "Cookie") == null);
+        }
+        catch (Exception ex) { log.Add("FAIL  exception: " + ex.Message); bad++; }
+        finally { try { Directory.Delete(dir, true); } catch { } }
+
+        log.Add(bad == 0 ? "ALL PASSED" : bad + " FAILED");
+        try { File.WriteAllLines(Path.Combine(Path.GetTempPath(), "markdownstudio-selftest.txt"), log.ToArray()); } catch { }
+        return bad == 0 ? 0 : 1;
+    }
+
     static void Serve(TcpListener listener)
     {
         while (true)
@@ -1774,10 +1830,52 @@ static class MarkdownStudio
         return null;
     }
 
+    // The value of one request header, or null.
+    static string HeaderValue(string head, string name)
+    {
+        foreach (string line in head.Split((char)10))
+        {
+            string l = line.Trim();
+            int colon = l.IndexOf(':');
+            if (colon <= 0) continue;
+            if (string.Equals(l.Substring(0, colon), name, StringComparison.OrdinalIgnoreCase))
+                return l.Substring(colon + 1).Trim();
+        }
+        return null;
+    }
+
+    // Only this machine's own address, on our own port, is a name the page is ever
+    // served under. A hostile site that re-points its domain at 127.0.0.1 (DNS
+    // rebinding) arrives with its own Host header and is refused here.
+    static bool HostOk(string host, int port)
+    {
+        if (host == null) return false;
+        return host == "127.0.0.1:" + port || host == "localhost:" + port;
+    }
+
+    // A browser states where a request came from. Absent means not a browser page
+    // (the exe's own tools); present has to be this page.
+    static bool OriginOk(string origin, int port)
+    {
+        if (origin == null) return true;
+        return origin == "http://127.0.0.1:" + port || origin == "http://localhost:" + port;
+    }
+
+    // Compared in time that does not depend on how much of the key was right.
+    static bool KeyOk(string given, string real)
+    {
+        if (given == null || real == null || real.Length == 0 || given.Length != real.Length) return false;
+        int diff = 0;
+        for (int i = 0; i < real.Length; i++) diff |= given[i] ^ real[i];
+        return diff == 0;
+    }
+
     static void Handle(TcpClient client)
     {
         try
         {
+            client.ReceiveTimeout = 15000;     // a stalled client must not hold a thread forever
+            client.SendTimeout = 15000;
             using (client)
             using (NetworkStream ns = client.GetStream())
             {
@@ -1795,14 +1893,24 @@ static class MarkdownStudio
                 int q = target.IndexOf('?');
                 if (q >= 0) { path = target.Substring(0, q); query = target.Substring(q + 1); }
 
+                if (ServePort != 0 &&
+                    (!HostOk(HeaderValue(head, "Host"), ServePort) ||
+                     !OriginOk(HeaderValue(head, "Origin"), ServePort)))
+                { SendText(ns, "403 Forbidden", "forbidden"); return; }
+
                 if (path == "/" || path == "/index.html")
-                { Send(ns, "200 OK", "text/html; charset=utf-8", page); return; }
+                {
+                    // the launch URL carries the key, so it must not leak in a Referer
+                    Send(ns, "200 OK", "text/html; charset=utf-8", page,
+                         "Referrer-Policy: no-referrer\r\nX-Content-Type-Options: nosniff\r\nX-Frame-Options: DENY\r\n");
+                    return;
+                }
 
                 if (path == "/__ws" || path == "/__file" || path == "/__all" ||
                     path == "/__launch" || path == "/__libdir" || path == "/__reveal" ||
                     path == "/__asset" || path == "/__entry" || path == "/__float")
                 {
-                    if (QueryValue(query, "k") != key)
+                    if (!KeyOk(QueryValue(query, "k"), key))
                     { SendText(ns, "403 Forbidden", "forbidden"); return; }
 
                     if (path == "/__launch")
@@ -2070,7 +2178,10 @@ static class MarkdownStudio
         op.wFunc = 3;                          // FO_DELETE
         op.pFrom = path + "\0\0";
         op.fFlags = 0x0040 | 0x0010 | 0x0004;  // ALLOWUNDO | NOCONFIRMATION | SILENT
-        if (SHFileOperation(ref op) != 0) File.Delete(path);
+        int rc = SHFileOperation(ref op);
+        // a silent run can report success yet leave the file (aborted, locked)
+        if ((rc != 0 || op.fAnyOperationsAborted != 0) && File.Exists(path)) File.Delete(path);
+        if (File.Exists(path)) throw new IOException("could not delete " + path);
     }
 
     static void SendText(NetworkStream ns, string status, string text)

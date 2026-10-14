@@ -647,6 +647,19 @@ body.pip-body{margin:0;height:100vh;display:block;overflow:hidden;background:var
   #preview .cb-c,#preview .anchor{display:none}
   #preview a{color:#000;border:0}
 }
+.sheet.hist{width:min(920px,100%)}
+.hist-b{display:grid;grid-template-columns:230px 1fr;gap:16px;padding:14px 16px 16px;min-height:360px}
+.hist-list{display:flex;flex-direction:column;gap:4px;overflow:auto;max-height:62vh}
+.hist-item{all:unset;box-sizing:border-box;cursor:pointer;padding:8px 10px;border-radius:8px;font-size:13px;border:1px solid transparent}
+.hist-item:hover{background:rgba(127,127,127,.12)}
+.hist-item:focus-visible{outline:2px solid currentColor;outline-offset:1px}
+.hist-item[aria-current="true"]{border-color:var(--bd);background:rgba(127,127,127,.12)}
+.hist-item small{display:block;opacity:.65;margin-top:2px}
+.hist-view{display:flex;flex-direction:column;min-width:0}
+.hist-bar{display:flex;align-items:center;gap:10px;font-size:13px;margin-bottom:8px}
+.hist-pre{margin:0;flex:1;overflow:auto;max-height:58vh;padding:12px;border:1px solid var(--bd);border-radius:8px;font:12.5px/1.55 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+.hist-empty{opacity:.7;font-size:13px;padding:8px 4px}
+@media (max-width:640px){.hist-b{grid-template-columns:1fr}.hist-list{max-height:24vh}}
 </style>
 </head>
 <body class="view-split">
@@ -850,6 +863,22 @@ body.pip-body{margin:0;height:100vh;display:block;overflow:hidden;background:var
     <div class="sheet-h"><h2>Keyboard shortcuts</h2><span class="grow"></span>
       <button class="btn btn-ico" id="helpClose">&#10005;</button></div>
     <div class="sheet-b"><div class="kbgrid" id="kbGrid"></div></div>
+  </div>
+</div>
+
+<!-- ================= version history ================= -->
+<div class="overlay" id="history" hidden>
+  <div class="sheet hist" role="dialog" aria-modal="true" aria-label="Version history">
+    <div class="sheet-h"><h2 id="histTitle">Version history</h2><span class="grow"></span>
+      <button class="btn btn-ico" id="histClose">&#10005;</button></div>
+    <div class="sheet-b hist-b">
+      <div class="hist-list" id="histList"></div>
+      <div class="hist-view">
+        <div class="hist-bar"><span id="histInfo"></span><span class="grow"></span>
+          <button class="btn btn-out" id="histRestore" disabled>Restore this version</button></div>
+        <pre class="hist-pre" id="histPre"></pre>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -2749,6 +2778,15 @@ const I18N = (function () {
     "That file is not a valid backup": "Berkas itu bukan cadangan yang sah",
     "Could not read that folder": "Gagal membaca folder itu",
     "Could not reopen that folder": "Gagal membuka ulang folder itu",
+    "Version history": "Riwayat versi",
+    "Version history…": "Riwayat versi…",
+    "Restore this version": "Pulihkan versi ini",
+    "Nothing to show history for": "Tidak ada riwayat untuk ditampilkan",
+    "No earlier versions yet. They are saved as you pause while typing.": "Belum ada versi sebelumnya. Versi disimpan saat Anda berhenti mengetik sejenak.",
+    "Current": "Saat ini",
+    "characters": "karakter",
+    "That editor is no longer the active one": "Editor itu sudah tidak aktif",
+    "Restored the version from ": "Versi dipulihkan dari ",
     "Could not open that folder": "Gagal membuka folder itu",
     "Could not open the folder picker": "Gagal membuka pemilih folder",
     "Could not rename the file on disk": "Gagal mengganti nama berkas di disk",
@@ -4848,9 +4886,9 @@ const MD = (function () {
     if (LIB.files.indexOf(file) < 0) LIB.files.push(file);
   }
   async function libDelete(file) {
-    LIB.files = LIB.files.filter(f => f !== file);
     const r = await fetch(libUrl("/__file", file), { method: "DELETE" });
     if (!r.ok && r.status !== 404) throw new Error((await r.text()) || r.status);
+    LIB.files = LIB.files.filter(f => f !== file);
   }
 
   /* A file name for a document, from its title. Collisions get a number rather
@@ -4886,7 +4924,7 @@ const MD = (function () {
      A document whose file has gone is written again rather than dropped: losing
      notes because a folder was moved or synced away would be far worse than a file
      coming back. Deleting one for good is what the Docs list's own delete is for. */
-  async function libSync() {
+  async function libSync(restoreMissing) {
     if (!SRV_KEY) return;
     let ws;
     try {
@@ -4913,16 +4951,29 @@ const MD = (function () {
     const loose = new Map();
     LIB.files.forEach(f => loose.set(f.toLowerCase(), f));
 
+    const gone = [];
     for (const d of state.docs) {
       if (!d.file) continue;
       const on = loose.get(String(d.file).toLowerCase());
-      if (!on) { d.file = null; continue; }
+      if (!on) {
+        /* On an ordinary start a file that is gone was deleted on purpose (Explorer,
+           another program): the document goes with it instead of being written back.
+           After choosing another folder, or when the folder is empty or unreadable,
+           the document is kept and written again, as before. */
+        if (!restoreMissing && LIB.files.length) { gone.push(d); continue; }
+        d.file = null; continue;
+      }
       d.file = on;
       loose.delete(on.toLowerCase());
       try {
         const text = await textOf(on);
         if (text !== d.content) { d.content = text; d.updated = Date.now(); }
       } catch (e) { }
+    }
+    if (gone.length) {
+      state.docs = state.docs.filter(d => gone.indexOf(d) < 0);
+      tabs = tabs.filter(t => !(t.kind === "local" && gone.some(d => d.id === t.docId)));
+      if (gone.some(d => d.id === state.active)) state.active = null;
     }
     /* The guide a first run writes is for an empty library. Run with a fresh
        browser profile - a reinstall, cleared site data - against a folder that
@@ -5003,7 +5054,7 @@ const MD = (function () {
 
       /* re-reading a folder of notes is not instant, so say what is happening */
       toast(res.moved ? "Moving your documents..." : "Reading " + res.root + "...");
-      await libSync();
+      await libSync(true);
       dropImages();
       renderNow();
       renderDocs();
@@ -5250,7 +5301,11 @@ const MD = (function () {
   }
 
   /* ---------- tabs ---------- */
+  function rememberOpenFiles() {
+    if (root && root.mode === "fs") idbSet("tabs", tabs.filter(t => t.kind === "file").map(t => t.path));
+  }
   function renderTabs() {
+    rememberOpenFiles();
     const bar = $("#tabbar");
     /* always there, as in Chrome: its empty part is where a copied tab is pasted */
     const show = tabs.length > 0;
@@ -7009,6 +7064,7 @@ const MD = (function () {
     { g: "File", id: "reopen", label: "Reopen closed editor", keys: ["Ctrl+Shift+T"], run: reopenClosed },
     { g: "File", id: "copyTab", label: "Copy tab", keys: [], run: () => active() && copyTab(active()) },
     { g: "File", id: "pasteTab", label: "Paste tab as a new document", keys: [], run: pasteTab },
+    { g: "File", id: "history", label: "Version history…", keys: ["Ctrl+K H"], run: showHistory },
     { g: "File", id: "rename", label: "Rename file", keys: ["F2"], run: renameActive },
     { g: "File", id: "copyPath", label: "Copy path of active file", keys: ["Shift+Alt+C"], run: () => copyActivePath(false) },
     { g: "File", id: "copyRel", label: "Copy relative path of active file", keys: ["Ctrl+Shift+Alt+C"], run: () => copyActivePath(true) },
@@ -7584,14 +7640,20 @@ const MD = (function () {
     if (!silent) { $("#docTitle").focus(); $("#docTitle").select(); }
     return d;
   }
-  function deleteDoc(id) {
+  async function deleteDoc(id) {
     const d = state.docs.find(x => x.id === id);
     if (!d) return;
     if (!confirm(tr("Delete") + ' "' + (d.name || tr("Untitled")) + '"? ' +
       (d.file && LIB.ok ? d.file + tr(" goes to the Recycle Bin.")
         : tr("This cannot be undone.")))) return;
+    /* a failed delete must not leave the file behind: it would come back as a new
+       document on the next start */
+    if (d.file && LIB.ok) {
+      clearTimeout(libTimers.get(id)); libTimers.delete(id);
+      try { await libDelete(d.file); }
+      catch (e) { toast(tr("Could not delete: ") + (e.message || e.name)); return; }
+    }
     state.docs = state.docs.filter(x => x.id !== id);
-    if (d.file && LIB.ok) libDelete(d.file).catch(() => { });
     const tab = tabs.find(t => t.kind === "local" && t.docId === id);
     if (tab) {
       const wasActive = tab.id === activeTab;
@@ -8687,6 +8749,113 @@ const MD = (function () {
     /* every other key is a command - see COMMANDS */
   }
 
+  /* ---------- version history ---------- */
+  /* A document is written to disk as you type, so one slip would otherwise be
+     permanent: there is no earlier copy anywhere. A snapshot is taken once typing has
+     paused, kept per document (or per file in an opened folder) in IndexedDB, and any
+     of them can be put back. Restoring first snapshots what is there now, so a
+     restore can itself be undone from the same list. */
+  const HIST_IDLE = 15000, HIST_GAP = 90000, HIST_MAX = 60, HIST_BYTES = 3000000;
+  let histTimer = null, histCur = null, histSel = -1;
+
+  function histKeyOf(t) {
+    if (!t) return null;
+    if (t.kind === "local") return t.docId ? "hist:d:" + t.docId : null;
+    return t.path ? "hist:f:" + (root ? root.name : "") + ":" + t.path : null;
+  }
+  async function histList(key) {
+    try { const v = await idbGet(key); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+  }
+  /* keeps the newest, and stops at a size so a huge document cannot fill the profile */
+  function histTrim(list) {
+    while (list.length > HIST_MAX) list.shift();
+    let bytes = 0;
+    for (let i = list.length - 1; i >= 0; i--) {
+      bytes += list[i].c.length;
+      if (bytes > HIST_BYTES && i < list.length - 1) { list.splice(0, i + 1); break; }
+    }
+    return list;
+  }
+  async function histSnap(t, force) {
+    const key = histKeyOf(t);
+    if (!key || typeof t.content !== "string" || !t.content.trim()) return false;
+    const list = await histList(key);
+    const last = list[list.length - 1];
+    if (last && last.c === t.content) return false;
+    if (last && !force && Date.now() - last.t < HIST_GAP) return false;
+    list.push({ t: Date.now(), c: t.content });
+    await idbSet(key, histTrim(list));
+    return true;
+  }
+  function histQueue() {
+    clearTimeout(histTimer);
+    const t = active();
+    if (!t) return;
+    histTimer = setTimeout(() => { histSnap(t, false); }, HIST_IDLE);
+  }
+  /* lines gained and lost, by counting - cheap, and enough to tell versions apart */
+  function histDiff(a, b) {
+    const x = a.split("\n"), y = b.split("\n"), seen = new Map();
+    x.forEach(l => seen.set(l, (seen.get(l) || 0) + 1));
+    let same = 0;
+    y.forEach(l => { const n = seen.get(l); if (n) { same++; seen.set(l, n - 1); } });
+    return { added: y.length - same, removed: x.length - same };
+  }
+  async function showHistory() {
+    const t = active();
+    const key = histKeyOf(t);
+    if (!t || !key) { toast(tr("Nothing to show history for")); return; }
+    await histSnap(t, true);                    /* what is on screen now is the newest entry */
+    histCur = { t: t, key: key, list: await histList(key) };
+    $("#histTitle").textContent = tr("Version history") + " - " + (t.name || tr("Untitled"));
+    renderHistory();
+    $("#history").hidden = false;
+    const first = $("#histList").querySelector("button");
+    if (first) first.focus();
+  }
+  function renderHistory() {
+    const box = $("#histList"), list = histCur.list;
+    box.textContent = "";
+    if (list.length < 2) {
+      const d = document.createElement("div");
+      d.className = "hist-empty";
+      d.textContent = tr("No earlier versions yet. They are saved as you pause while typing.");
+      box.appendChild(d);
+    }
+    for (let i = list.length - 1; i >= 0; i--) {
+      const b = document.createElement("button");
+      b.className = "hist-item"; b.type = "button";
+      b.textContent = (i === list.length - 1 ? tr("Current") + " - " : "") + timeAgo(list[i].t);
+      const sm = document.createElement("small");
+      const d = i > 0 ? histDiff(list[i - 1].c, list[i].c) : null;
+      sm.textContent = new Date(list[i].t).toLocaleString() + (d ? "  +" + d.added + " -" + d.removed : "");
+      b.appendChild(sm);
+      b.addEventListener("click", () => pickHistory(i));
+      box.appendChild(b);
+    }
+    pickHistory(list.length - 1);
+  }
+  function pickHistory(i) {
+    histSel = i;
+    const e = histCur.list[i];
+    $("#histPre").textContent = e ? e.c : "";
+    $("#histInfo").textContent = e ? new Date(e.t).toLocaleString() + " - " + e.c.length + " " + tr("characters") : "";
+    $("#histRestore").disabled = !e || i === histCur.list.length - 1;
+    const items = $("#histList").querySelectorAll(".hist-item");
+    items.forEach((el, n) => el.setAttribute("aria-current", histCur.list.length - 1 - n === i ? "true" : "false"));
+  }
+  async function restoreHistory() {
+    const e = histCur && histCur.list[histSel];
+    if (!e) return;
+    const t = histCur.t;
+    if (active() !== t) { toast(tr("That editor is no longer the active one")); return; }
+    await histSnap(t, true);                    /* so the restore can be undone from here */
+    ed.value = e.c;
+    ed.dispatchEvent(new Event("input", { bubbles: true }));
+    $("#history").hidden = true;
+    toast(tr("Restored the version from ") + new Date(e.t).toLocaleString());
+  }
+
   /* ---------- global keys ---------- */
   /* Esc closes whatever is on top; everything else goes through the command list. */
   function onGlobalKey(e) {
@@ -8696,6 +8865,7 @@ const MD = (function () {
       if (!$("#palette").hidden) { closePalette(); return; }
       if (!$("#imgView").hidden) { hideImage(); return; }
       if (!$("#settings").hidden) { showSettings(false); return; }
+      if (!$("#history").hidden) { $("#history").hidden = true; return; }
       if (!$("#help").hidden) { $("#help").hidden = true; return; }
       if (!$("#menu").hidden) { showMenu(false); return; }
       if (!$("#findbar").hidden) { showFind(false); return; }
@@ -8953,8 +9123,23 @@ const MD = (function () {
     startStep("renderTree", renderTree);
     startStep("updateSaveUI", updateSaveUI);
     startStep("updateCursor", updateCursor);
-    idbGet("root").then(h => {
-      if (h && !root) { reopen = { name: h.name, handle: h }; renderTree(); }
+    /* A reload used to leave only a "Reopen" button. When the browser still holds the
+       permission the folder, and the files that were open in it, come straight back. */
+    idbGet("root").then(async h => {
+      if (!h || root) return;
+      reopen = { name: h.name, handle: h };
+      let perm = "prompt";
+      try { perm = h.queryPermission ? await h.queryPermission({ mode: "readwrite" }) : "prompt"; } catch (e) { }
+      if (perm !== "granted") { renderTree(); return; }
+      try {
+        await useFolder(h);
+        reopen = null;
+        const saved = (await idbGet("tabs")) || [];
+        for (const pth of saved) {
+          const n = await findFileNode(pth);
+          if (n) await openFileNode(n);
+        }
+      } catch (e) { renderTree(); }
     });
     /* launched as "Open with" from Explorer: the exe is serving that file's folder */
     loadServerWorkspace(true);
@@ -8966,6 +9151,7 @@ const MD = (function () {
 
     /* editor */
     ed.addEventListener("input", () => {
+      histQueue();
       const t = active();
       if (t) {
         t.content = ed.value;
@@ -9213,6 +9399,9 @@ const MD = (function () {
     $("#setChange").addEventListener("click", libChooseFolder);
     $("#setOpen").addEventListener("click", libReveal);
     $("#helpClose").addEventListener("click", () => { $("#help").hidden = true; });
+    $("#histClose").addEventListener("click", () => { $("#history").hidden = true; });
+    $("#history").addEventListener("click", e => { if (e.target.id === "history") $("#history").hidden = true; });
+    $("#histRestore").addEventListener("click", restoreHistory);
     $("#help").addEventListener("click", e => { if (e.target.id === "help") $("#help").hidden = true; });
 
     /* sidebar tabs */

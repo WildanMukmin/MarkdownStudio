@@ -10,6 +10,15 @@ rem it. That copy is deleted by the next build, once the app has been closed.
 setlocal
 cd /d "%~dp0"
 
+rem index.html is generated from src\ - rebuild it first so the exe never bakes in a stale one
+if exist src\template.html (
+  powershell -NoProfile -ExecutionPolicy Bypass -File build-html.ps1
+  if errorlevel 1 (
+    echo Assembling index.html from src\ failed.
+    exit /b 1
+  )
+)
+
 if not exist index.html (
   echo index.html was not found next to this script.
   exit /b 1
